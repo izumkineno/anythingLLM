@@ -53,12 +53,17 @@ def parse_json_source(value: str | None) -> Any:
     return json.loads(text)
 
 
-def maybe_json_print(text: str) -> None:
+def maybe_json_print(text: str, text_only: bool = False) -> None:
     try:
         obj = json.loads(text)
     except Exception:
         print(text)
         return
+    if text_only and isinstance(obj, dict):
+        response_text = obj.get("textResponse")
+        if isinstance(response_text, str):
+            print(response_text)
+            return
     print(json.dumps(obj, ensure_ascii=False, indent=2))
 
 
@@ -160,6 +165,7 @@ def http_request(
     file_field: tuple[str, str] | None = None,
     extra_headers: dict[str, str] | None = None,
     stream: bool = False,
+    text_only: bool = False,
 ) -> None:
     url = join_path(path)
     headers = auth_header()
@@ -198,7 +204,7 @@ def http_request(
                 print()
                 return
             body = resp.read().decode("utf-8", "replace")
-            maybe_json_print(body)
+            maybe_json_print(body, text_only=text_only)
     except error.HTTPError as exc:
         body = exc.read().decode("utf-8", "replace")
         die(f"HTTP {exc.code}: {body}")
@@ -252,7 +258,7 @@ def workspace_chat(args: argparse.Namespace, stream: bool = False) -> None:
     if attachments:
         body["attachments"] = attachments
     endpoint = f"/workspace/{args.slug}/stream-chat" if stream else f"/workspace/{args.slug}/chat"
-    http_request("POST", endpoint, json_body=body, stream=stream)
+    http_request("POST", endpoint, json_body=body, stream=stream, text_only=args.text_only)
 
 
 def workspace_update_embeddings(args: argparse.Namespace) -> None:
@@ -347,7 +353,7 @@ def document_remove_folder(args: argparse.Namespace) -> None:
 
 def document_move_files(args: argparse.Namespace) -> None:
     payload = require_json(args.json, arg_name="--json", expected_type=list)
-    http_request("POST", "/document/move-files", json_body=payload)
+    http_request("POST", "/document/move-files", json_body={"files": payload})
 
 
 def thread_new(args: argparse.Namespace) -> None:
@@ -369,9 +375,9 @@ def thread_chat(args: argparse.Namespace, stream: bool = False) -> None:
     if args.reset:
         body["reset"] = True
     if stream:
-        http_request("POST", f"/workspace/{args.workspace}/thread/{args.thread}/stream-chat", json_body=body, stream=True)
+        http_request("POST", f"/workspace/{args.workspace}/thread/{args.thread}/stream-chat", json_body=body, stream=True, text_only=args.text_only)
     else:
-        http_request("POST", f"/workspace/{args.workspace}/thread/{args.thread}/chat", json_body=body)
+        http_request("POST", f"/workspace/{args.workspace}/thread/{args.thread}/chat", json_body=body, text_only=args.text_only)
 
 
 def thread_update(args: argparse.Namespace) -> None:
@@ -407,9 +413,9 @@ def ask(args: argparse.Namespace) -> None:
     if args.reset:
         body["reset"] = True
     if args.stream:
-        http_request("POST", f"/workspace/{args.workspace}/thread/{thread}/stream-chat", json_body=body, stream=True)
+        http_request("POST", f"/workspace/{args.workspace}/thread/{thread}/stream-chat", json_body=body, stream=True, text_only=args.text_only)
     else:
-        http_request("POST", f"/workspace/{args.workspace}/thread/{thread}/chat", json_body=body)
+        http_request("POST", f"/workspace/{args.workspace}/thread/{thread}/chat", json_body=body, text_only=args.text_only)
 
 
 def vector_search(args: argparse.Namespace) -> None:
@@ -646,6 +652,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--mode", default="chat", choices=["chat", "query", "automatic"])
     sp.add_argument("--session-id")
     sp.add_argument("--attachments", help="附件 JSON 数组、文件路径，或 - 从 stdin 读取")
+    sp.add_argument("--text-only", action="store_true", help="只输出 textResponse 正文，适合重定向保存代码/文稿")
     sp.add_argument("--reset", action="store_true")
     sp.set_defaults(func=lambda args: workspace_chat(args, stream=False))
 
@@ -655,6 +662,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--mode", default="chat", choices=["chat", "query", "automatic"])
     sp.add_argument("--session-id")
     sp.add_argument("--attachments", help="附件 JSON 数组、文件路径，或 - 从 stdin 读取")
+    sp.add_argument("--text-only", action="store_true", help="只输出 textResponse 正文（流式模式下通常与默认输出一致）")
     sp.add_argument("--reset", action="store_true")
     sp.set_defaults(func=lambda args: workspace_chat(args, stream=True))
 
@@ -748,6 +756,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--message", help="message, file path, or - for stdin")
     sp.add_argument("--mode", default="chat", choices=["chat", "query", "automatic"])
     sp.add_argument("--user-id", type=int)
+    sp.add_argument("--text-only", action="store_true", help="只输出 textResponse 正文，适合重定向保存代码/文稿")
     sp.add_argument("--reset", action="store_true")
     sp.set_defaults(func=lambda args: thread_chat(args, stream=False))
 
@@ -757,6 +766,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--message", help="message, file path, or - for stdin")
     sp.add_argument("--mode", default="chat", choices=["chat", "query", "automatic"])
     sp.add_argument("--user-id", type=int)
+    sp.add_argument("--text-only", action="store_true", help="只输出 textResponse 正文（流式模式下通常与默认输出一致）")
     sp.add_argument("--reset", action="store_true")
     sp.set_defaults(func=lambda args: thread_chat(args, stream=True))
 
@@ -783,6 +793,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--message", help="message, file path, or - for stdin")
     p.add_argument("--mode", default="chat", choices=["chat", "query", "automatic"])
     p.add_argument("--stream", action="store_true")
+    p.add_argument("--text-only", action="store_true", help="只输出 textResponse 正文，适合重定向保存代码/文稿")
     p.add_argument("--reset", action="store_true")
     p.set_defaults(func=ask)
 

@@ -1,66 +1,86 @@
+---
+name: anythingllm
+description: Use when working with AnythingLLM through the local skill or CLI, especially when API paths, parameters, environment variables, or troubleshooting steps need to stay consistent and low-token. AnythingLLM 在大多数常见场景下更适合先按单层文件夹嵌套理解；有证据再扩展到多层。
+---
+
 # AnythingLLM API Skill
 
-低 token 使用 AnythingLLM 的规则集。
+低 token 使用 AnythingLLM 的轻量入口。
 
-## 先决条件
+## 核心硬规则（始终生效）
 
-- 必须先检查环境变量：`ANYTHINGLLM_BASE_URL`、`ANYTHINGLLM_API_KEY`
-- 如果缺少任意一个：**立即停止当前调用链**，直接告诉用户缺少环境变量，不能继续
-- 不要在对话、示例或文档里输出密钥、Bearer 值、绝对路径、用户目录
+- 默认先按**单层文件夹嵌套**理解 AnythingLLM 的大多数常见结构；这是高命中默认，不是绝对限制
+- 如果目录证据、源码引用、导入路径或报错信息明确指向多层结构，再切换为多层递归理解
+- 必须先检查：`ANYTHINGLLM_BASE_URL`、`ANYTHINGLLM_API_KEY`
+- 在任何 AnythingLLM 操作前，必须先验证 **接入链接 + API key**；优先运行轻量认证命令（默认：`python anythingllm.py auth`）确认它们真的可用
+- 在 Windows PowerShell 中执行 `anythingllm.py` 时，默认先设置：`$env:PYTHONIOENCODING = "utf-8"`
+- 如果要保存 `search` / `chat` / `ask` 输出，默认优先走 UTF-8 文件重定向：`... 2>&1 | Out-File -Encoding utf8 <file>; Get-Content <file>`
+- 如果当前环境和用户本轮消息里**没有提供** `ANYTHINGLLM_BASE_URL` 或 `ANYTHINGLLM_API_KEY`，必须**立刻停止**当前调用链，并直接询问用户补充缺失项；未补齐前不得继续
+- 如果只提供了其中一项，也必须立刻停止并询问另一项；不要假设可从别处自动补全
+- 仅仅“环境变量存在”不等于“已验证可用”；认证成功后才能继续执行后续 AnythingLLM 命令
+- 优先使用仓库内 `anythingllm.py`，不要先手写 REST
+- 不要整读 `anythingllm-developer-api.zh-CN.md`；必须先搜索关键词，再只读命中片段
+- 不要输出密钥、Bearer、绝对路径、用户目录
 
-## 调用优先级
+## 强制前置门槛
 
-1. **优先使用仓库内 `anythingllm.py`**
-2. 高层命令不够时，再用 `python anythingllm.py api ...`
-3. 只有在 CLI 无法覆盖且需要核对规范时，才读文档
+在任何 `workspace` / `document` / `thread` / `search` / `admin` / `api` / `embed` 操作前，按下面顺序执行：
 
-## API 文档读取优先级
+1. 收集 `ANYTHINGLLM_BASE_URL`、`ANYTHINGLLM_API_KEY`
+2. 若用户本轮明确提供了新值，以用户最新提供的值为当前事实
+3. 若两者任一缺失：**立刻停止**，只询问缺失项；不要继续读文档、跑 CLI、猜路径或尝试 API
+4. 若两者齐全：先运行 `python anythingllm.py auth` 做轻量认证 / 连通性验证
+5. 只有在认证成功后，才继续后续 AnythingLLM 操作
+6. 若认证失败：先报告“key 或接入链接校验失败”，然后再进入排查；不要把失败当成业务命令异常
 
-遇到疑似 API 错误、路径不确定、参数不确定时，按下面顺序处理：
+## 按需加载（只读需要的文件）
 
-1. **先搜索读取** `anythingllm-developer-api.zh-CN.md`
-2. 如果文档无法确认，再看 `/api/docs/`
+根据任务类型，继续读取：
 
-禁止整文件通读 `anythingllm-developer-api.zh-CN.md`。必须先搜索关键词，再只读取命中的相关片段。
+- **上传文档 / 绑定 workspace / 读取知识库**
+  - 读：`workflows-upload-and-retrieval.md`
+- **使用 chat / stream-chat / thread chat 直接协写代码、模块、debug 分析或文件产物**
+  - 读：`workflows-chat.md`
+- **查询 workspace / 先 search 抽证据，再 ask 结构化整理 / 生成示例或文档产物**
+  - 读：`workflows-ask-query.md`
+- **API 路径不确定 / 参数不确定 / 命令失败排查**
+  - 读：`routing-and-troubleshooting.md`
+- **维护自定义错误表 / 查询次数 / 追加踩坑记录**
+  - 读：`pitfalls-maintenance.md`
+- **查具体历史坑点**
+  - 读：`anythingllm-skill-pitfalls.md`
 
-推荐关键词：
+如果当前问题已经明显命中历史坑点，先读 `anythingllm-skill-pitfalls.md`，再决定是否继续查 API 文档。
 
-- 路径片段：`/v1/workspace`、`/v1/document`
-- 命令名：`update-env`、`manage-users`
-- 错误码：`403`、`404`、`422`
-- 业务词：`embed`、`thread`、`vector-search`
+如果任务目标是：
 
-## 操作规则
+- 直接让对端 LLM 生成代码、模块、debug 分析、重构建议或某个文件产物
+- 需要使用 `workspace chat` / `thread chat` / `stream-chat`
+- 需要判断是否配合 `--text-only` 直接落盘
 
-- 能用已有一等命令就不要手写 REST 路径
-- 长 JSON 优先走文件或 stdin，不要把大 JSON 直接塞进提示词
-- 上传、原始文本、聊天、向量检索都优先走 `anythingllm.py` 已有子命令
-- 如果单次调用失败，先检查：
-  - 环境变量是否存在
-  - 子命令是否已覆盖
-  - API 文档片段是否与当前命令一致
-  - 是否命中了已知踩坑
+则优先读取：`workflows-chat.md`
 
-## 疑似 API 错误排查顺序
+如果任务目标是：
 
-1. 查 `anythingllm-skill-pitfalls.md`
-2. 搜索读取 `anythingllm-developer-api.zh-CN.md`
-3. 再看 `/api/docs/`
-4. 最后才判断为服务端异常或文档过期
+- 查询某个 workspace 并整理答案
+- 基于知识库生成复杂示例 / 单文件 demo / 文档草稿
+- 先 search，再 ask 做结构化归纳
 
-## 踩坑记录
+则优先读取：`workflows-ask-query.md`
 
-单独维护文件：`anythingllm-skill-pitfalls.md`
+## 最小工作顺序
 
-规则：
-
-- 如果这次调用不顺利，但最终定位出原因，要补一条踩坑记录
-- 记录要短，只写：**现象 / 原因 / 正确做法**
-- 下次先读这个文件，再决定是否继续查 API 文档
+1. 收集并检查 `ANYTHINGLLM_BASE_URL`、`ANYTHINGLLM_API_KEY`
+2. 如果缺失任意一项，立刻停止并询问用户；不要继续执行 AnythingLLM 相关操作
+3. 在 Windows PowerShell 中先设置：`$env:PYTHONIOENCODING = "utf-8"`
+4. 先跑 `python anythingllm.py auth` 验证 key 和接入链接
+5. 判断任务类型，只加载对应子文件
+6. 优先跑 `anythingllm.py` 高层命令
+7. 如果输出较长或需要落盘，优先使用 UTF-8 重定向输出
+8. 失败时先查 `anythingllm-skill-pitfalls.md`
+9. 仍不确定时，再搜索 `anythingllm-developer-api.zh-CN.md`
 
 ## 常用入口
-
-只记入口，不重复展开大表：
 
 - `python anythingllm.py --help`
 - `python anythingllm.py workspace --help`
@@ -78,4 +98,7 @@
 - 禁止输出或保存密钥
 - 禁止默认整读 `anythingllm-developer-api.zh-CN.md`
 - 禁止跳过环境变量检查
+- 禁止在**未验证** base URL 和 API key 前继续执行 AnythingLLM 操作
+- 禁止把“环境变量已存在”误判为“key 和接入链接已验证”
 - 禁止在已有 CLI 命令可用时优先走手写 HTTP
+- 禁止在没有证据时默认按多层目录递归理解 AnythingLLM 结构
