@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import mimetypes
 import os
@@ -16,6 +17,12 @@ DEFAULT_BASE_URL = os.getenv("ANYTHINGLLM_BASE_URL", "http://localhost:3001").rs
 DEFAULT_API_ROOT = os.getenv("ANYTHINGLLM_API_ROOT", f"{DEFAULT_BASE_URL}/api/v1").rstrip("/")
 DEFAULT_API_KEY = os.getenv("ANYTHINGLLM_API_KEY", "")
 USER_AGENT = "anythingllm-cli/1.0"
+ZERO_WIDTH_TRANSLATION = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff"), None)
+CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+HTTP_ERROR_SNIPPET_RE = re.compile(
+    r"\b(?:404|403|500|502|503)\b.*\b(?:not found|forbidden|bad gateway|service unavailable)\b|\bnginx/\d",
+    re.IGNORECASE,
+)
 
 
 def die(message: str, code: int = 1) -> None:
@@ -66,14 +73,66 @@ def write_output_file(path: str, payload: Any) -> None:
 def truncate_text(text: str, limit: int) -> str:
     if limit <= 0:
         return ""
-    normalized = re.sub(r"\s+", " ", text).strip()
+    normalized = re.sub(r"\s+", " ", sanitize_text_for_display(text)).strip()
     if len(normalized) <= limit:
         return normalized
     return normalized[: max(limit - 1, 0)].rstrip() + "…"
 
 
+def sanitize_text_for_display(text: str) -> str:
+    cleaned = str(text or "").translate(ZERO_WIDTH_TRANSLATION)
+    cleaned = CONTROL_CHAR_RE.sub("", cleaned)
+    return cleaned
+
+
+def sanitize_maybe_text(value: Any) -> Any:
+    if isinstance(value, str):
+        return sanitize_text_for_display(value)
+    return value
+
+
+def normalize_text_for_match(text: str) -> str:
+    cleaned = sanitize_text_for_display(text)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip().lower()
+    return cleaned
+
+
+def is_noise_snippet(text: str) -> bool:
+    normalized = normalize_text_for_match(text)
+    if not normalized:
+        return True
+    if HTTP_ERROR_SNIPPET_RE.search(normalized) and len(normalized) < 120:
+        return True
+    return normalized in {
+        "404 not found",
+        "404 not found nginx/1.22.0",
+        "403 forbidden",
+        "500 internal server error",
+        "502 bad gateway",
+        "503 service unavailable",
+    }
+
+
+def safe_print_text(text: str, *, end: str = "\n", flush: bool = False) -> None:
+    try:
+        print(text, end=end, flush=flush)
+        return
+    except UnicodeEncodeError:
+        target = sys.stdout
+        encoding = getattr(target, "encoding", None) or "utf-8"
+        rendered = f"{text}{end}".encode(encoding, errors="backslashreplace")
+        if hasattr(target, "buffer") and target.buffer is not None:
+            target.buffer.write(rendered)
+            if flush:
+                target.flush()
+            return
+        target.write(rendered.decode(encoding, errors="strict"))
+        if flush:
+            target.flush()
+
+
 def print_json(payload: Any) -> None:
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    safe_print_text(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 def compact_dict(data: dict[str, Any]) -> dict[str, Any]:
@@ -112,14 +171,14 @@ def maybe_json_print(
     except Exception:
         if json_output:
             write_output_file(json_output, text)
-        print(text)
+        safe_print_text(text)
         return
     if json_output:
         write_output_file(json_output, obj)
     if text_only and isinstance(obj, dict):
         response_text = obj.get("textResponse")
         if isinstance(response_text, str):
-            print(response_text)
+            safe_print_text(response_text)
             return
     display_obj = obj
     if isinstance(obj, dict):
@@ -130,7 +189,7 @@ def maybe_json_print(
             display_obj["sources"] = display_obj["sources"][:sources_limit]
         if no_metrics:
             display_obj.pop("metrics", None)
-    print(json.dumps(display_obj, ensure_ascii=False, indent=2))
+    print_json(display_obj)
 
 
 def summarize_workspace(
@@ -150,37 +209,44 @@ def summarize_workspace(
     threads = workspace.get("threads") if isinstance(workspace.get("threads"), list) else []
     docs_preview = [
         {
-            "filename": item.get("filename"),
-            "docpath": item.get("docpath"),
+            "filename": sanitize_maybe_text(item.get("filename")),
+            "docpath": sanitize_maybe_text(item.get("docpath")),
         }
         for item in documents[: max(max_docs, 0)]
         if isinstance(item, dict)
     ]
     threads_preview = [
-        {"slug": item.get("slug"), "user_id": item.get("user_id")}
+        {"slug": sanitize_maybe_text(item.get("slug")), "user_id": item.get("user_id")}
         for item in threads[: max(max_docs, 0)]
         if isinstance(item, dict)
     ]
 
     if docs_only:
         return {
-            "slug": workspace.get("slug"),
-            "name": workspace.get("name"),
+            "slug": sanitize_maybe_text(workspace.get("slug")),
+            "name": sanitize_maybe_text(workspace.get("name")),
             "documentsCount": len(documents),
             "documentsPreview": docs_preview,
         }
     if threads_only:
         return {
-            "slug": workspace.get("slug"),
-            "name": workspace.get("name"),
+            "slug": sanitize_maybe_text(workspace.get("slug")),
+            "name": sanitize_maybe_text(workspace.get("name")),
             "threadsCount": len(threads),
             "threadsPreview": threads_preview,
         }
     return {
         "id": workspace.get("id"),
-        "slug": workspace.get("slug"),
-        "name": workspace.get("name"),
-        "chatMode": workspace.get("chatMode"),
+        "slug": sanitize_maybe_text(workspace.get("slug")),
+        "name": sanitize_maybe_text(workspace.get("name")),
+        "chatMode": sanitize_maybe_text(workspace.get("chatMode")),
+        "chatProvider": sanitize_maybe_text(workspace.get("chatProvider")),
+        "chatModel": sanitize_maybe_text(workspace.get("chatModel")),
+        "chatConfigStatus": (
+            "workspace chat model not configured; requests may fall back to the default chat model"
+            if not workspace.get("chatProvider") or not workspace.get("chatModel")
+            else None
+        ),
         "topN": workspace.get("topN"),
         "similarityThreshold": workspace.get("similarityThreshold"),
         "lastUpdatedAt": workspace.get("lastUpdatedAt"),
@@ -203,19 +269,19 @@ def summarize_workspace_list(payload: dict[str, Any], *, max_items: int = 10) ->
             compact_dict(
                 {
                     "id": workspace.get("id"),
-                    "slug": workspace.get("slug"),
-                    "name": workspace.get("name"),
-                    "chatMode": workspace.get("chatMode"),
-                    "chatProvider": workspace.get("chatProvider"),
-                    "chatModel": workspace.get("chatModel"),
+                    "slug": sanitize_maybe_text(workspace.get("slug")),
+                    "name": sanitize_maybe_text(workspace.get("name")),
+                    "chatMode": sanitize_maybe_text(workspace.get("chatMode")),
+                    "chatProvider": sanitize_maybe_text(workspace.get("chatProvider")),
+                    "chatModel": sanitize_maybe_text(workspace.get("chatModel")),
                     "topN": workspace.get("topN"),
                     "lastUpdatedAt": workspace.get("lastUpdatedAt"),
                     "threadsCount": len(threads),
                     "threadsPreview": [
                         compact_dict(
                             {
-                                "slug": thread.get("slug"),
-                                "name": thread.get("name"),
+                                "slug": sanitize_maybe_text(thread.get("slug")),
+                                "name": sanitize_maybe_text(thread.get("name")),
                                 "user_id": thread.get("user_id"),
                             }
                         )
@@ -246,29 +312,32 @@ def summarize_search_results(
     payload: dict[str, Any],
     *,
     snippet_chars: int = 180,
-    hide_404: bool = False,
-    dedupe: bool = False,
+    hide_404: bool = True,
+    dedupe: bool = True,
     min_score: float | None = None,
     titles_only: bool = False,
 ) -> dict[str, Any]:
     raw_results = payload.get("results") if isinstance(payload.get("results"), list) else []
-    seen: set[tuple[str | None, str | None, str]] = set()
+    seen: set[str] = set()
     results: list[dict[str, Any]] = []
 
     for item in raw_results:
         if not isinstance(item, dict):
             continue
         metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-        title = metadata.get("title") or item.get("title")
-        source = metadata.get("chunkSource") or metadata.get("url") or item.get("url")
-        snippet = truncate_text(str(item.get("text") or ""), snippet_chars)
-        if hide_404 and "404 Not Found" in snippet:
+        title = sanitize_maybe_text(metadata.get("title") or item.get("title"))
+        source = sanitize_maybe_text(metadata.get("chunkSource") or metadata.get("url") or item.get("url"))
+        raw_text = sanitize_text_for_display(str(item.get("text") or ""))
+        if hide_404 and is_noise_snippet(raw_text):
             continue
+        snippet = truncate_text(raw_text, snippet_chars)
         score = result_score(item)
         if min_score is not None and score is not None and score < min_score:
             continue
         if dedupe:
-            signature = (source, title, snippet)
+            normalized_text = normalize_text_for_match(raw_text)
+            fallback_signature = "|".join(filter(None, [str(source or ""), str(title or "")]))
+            signature = hashlib.sha1((normalized_text or fallback_signature).encode("utf-8")).hexdigest()
             if signature in seen:
                 continue
             seen.add(signature)
@@ -292,6 +361,7 @@ def summarize_document_tree(payload: dict[str, Any], *, max_items: int = 20) -> 
     root = payload.get("localFiles")
     if not isinstance(root, dict):
         return payload
+    root_name = str(sanitize_maybe_text(root.get("name")) or "")
 
     preview: list[dict[str, Any]] = []
     folders_count = 0
@@ -300,13 +370,13 @@ def summarize_document_tree(payload: dict[str, Any], *, max_items: int = 20) -> 
     def walk(node: dict[str, Any], parent_path: str = "") -> None:
         nonlocal folders_count, files_count
         node_type = node.get("type")
-        name = str(node.get("name") or "")
+        name = str(sanitize_maybe_text(node.get("name")) or "")
         path = f"{parent_path}/{name}" if parent_path and name else name or parent_path
         children = node.get("items") if isinstance(node.get("items"), list) else []
 
         if node_type == "folder":
             folders_count += 1
-            if path != root.get("name") and len(preview) < max(max_items, 0):
+            if path != root_name and len(preview) < max(max_items, 0):
                 preview.append(
                     {
                         "type": "folder",
@@ -326,7 +396,7 @@ def summarize_document_tree(payload: dict[str, Any], *, max_items: int = 20) -> 
                     {
                         "type": "file",
                         "path": path,
-                        "title": node.get("title"),
+                        "title": sanitize_maybe_text(node.get("title")),
                         "tokenEstimate": node.get("token_count_estimate"),
                         "cached": node.get("cached"),
                     }
@@ -336,7 +406,7 @@ def summarize_document_tree(payload: dict[str, Any], *, max_items: int = 20) -> 
     walk(root)
     total_entries = max(folders_count - 1, 0) + files_count
     return {
-        "root": root.get("name"),
+        "root": root_name,
         "foldersCount": max(folders_count - 1, 0),
         "filesCount": files_count,
         "itemsPreview": preview,
@@ -679,10 +749,10 @@ def http_request(
                     )
                     text = event.get("textResponse", "")
                     if text:
-                        print(text, end="", flush=True)
+                        safe_print_text(text, end="", flush=True)
                     if event.get("close"):
                         break
-                print()
+                safe_print_text("")
                 return
             body = resp.read().decode("utf-8", "replace")
             maybe_json_print(
@@ -1441,8 +1511,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--full", action="store_true", help="输出完整原始 JSON，而不是默认紧凑摘要")
     p.add_argument("--compact", action="store_true", help="兼容性参数：当前紧凑摘要已是默认行为")
     p.add_argument("--snippet-chars", type=int, default=180, help="紧凑模式下 snippet 截断长度")
-    p.add_argument("--hide-404", action="store_true", help="过滤正文中含 404 Not Found 的噪声结果")
-    p.add_argument("--dedupe", action="store_true", help="按 source/title/snippet 去重结果")
+    p.set_defaults(hide_404=True, dedupe=True)
+    p.add_argument("--hide-404", dest="hide_404", action="store_true", help="过滤 404 / 错误页噪声（默认开启）")
+    p.add_argument("--no-hide-404", dest="hide_404", action="store_false", help="关闭 404 / 错误页噪声过滤")
+    p.add_argument("--dedupe", dest="dedupe", action="store_true", help="启用结果去重（默认开启）")
+    p.add_argument("--no-dedupe", dest="dedupe", action="store_false", help="关闭结果去重")
     p.add_argument("--min-score", type=float, help="仅保留 score 不低于该阈值的结果")
     p.add_argument("--titles-only", action="store_true", help="仅输出 title/source/score，不输出 snippet")
     p.set_defaults(func=vector_search)

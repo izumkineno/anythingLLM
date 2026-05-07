@@ -20,6 +20,7 @@ class SkillDocsTokenGuidanceTests(unittest.TestCase):
         self.assertIn("--compact", text)
         self.assertIn("Get-Content temp.txt -TotalCount 40", text)
         self.assertIn("--text-only --no-sources --no-metrics", text)
+        self.assertIn("二次 `search` 复核", text)
 
     def test_workflows_chat_prefers_text_only_for_file_redirection(self):
         text = self.read("workflows-chat.md")
@@ -31,6 +32,7 @@ class SkillDocsTokenGuidanceTests(unittest.TestCase):
         text = self.read("anythingllm-skill-pitfalls.md")
         self.assertIn("整份回读进上下文", text)
         self.assertIn("Get-Content -TotalCount", text)
+        self.assertIn("ask` 的整理结果直接当成最终事实", text)
 
 
 if __name__ == "__main__":

@@ -140,6 +140,18 @@ class WorkspaceAndThreadCommandTests(unittest.TestCase):
         self.assertEqual(args.min_score, 0.9)
         self.assertTrue(args.titles_only)
 
+    def test_search_parses_disable_flags(self):
+        args = self.parse(
+            "search",
+            "demo-workspace",
+            "--query",
+            "viewport",
+            "--no-hide-404",
+            "--no-dedupe",
+        )
+        self.assertFalse(args.hide_404)
+        self.assertFalse(args.dedupe)
+
     def test_thread_update_uses_expected_body(self):
         args = self.parse("thread", "update", "demo-workspace", "thread-1", "--name", "Renamed Thread")
         with patch.object(cli, "http_request") as http_request:
