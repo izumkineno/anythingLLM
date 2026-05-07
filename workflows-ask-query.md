@@ -33,11 +33,13 @@
 
 2. **确认 workspace**
    - 不确定 slug 时：`python anythingllm.py workspace list`
-   - 已知 slug 时：`python anythingllm.py workspace get <slug>`
+   - 已知 slug 时：默认先看摘要：`python anythingllm.py workspace get <slug>`
+   - 只有确实需要完整原始 JSON 时，才使用：`python anythingllm.py workspace get <slug> --full`
    - 重点看：workspace 是否存在、documents 是否有内容、知识源质量是否可用
 
 3. **先做多轮 search 抽证据**
    - 按主题拆成多次查询，不要只搜一轮
+   - 默认优先使用紧凑结果，不要把原始长 passage 整包灌回上下文
    - 示例：初始化、交互、动画、状态、视口、事件分别搜索
    - 目标不是一次搜全，而是抽出：
      - 稳定命中的 API 名称
@@ -52,9 +54,10 @@
    - 保留：
      - 多次稳定命中的 API / 模式
      - 能直接落到目标产物中的知识点
+   - 推荐优先使用：`--hide-404 --dedupe --min-score <阈值>`
 
 5. **再用 ask 做结构化整理**
-   - 命令：`python anythingllm.py ask <slug> --mode query --message <prompt>`
+   - 命令：`python anythingllm.py ask <slug> --mode query --text-only --no-sources --no-metrics --message <prompt>`
    - prompt 要明确要求：
      - 目标产物类型（示例 / 文档 / 方案）
      - 必须覆盖的能力点
@@ -77,9 +80,9 @@
 python anythingllm.py auth
 python anythingllm.py workspace list
 python anythingllm.py workspace get <slug>
-python anythingllm.py search <slug> --query "..." --top-n 6
-python anythingllm.py search <slug> --query "..." --top-n 6
-python anythingllm.py ask <slug> --mode query --message "..."
+python anythingllm.py search <slug> --query "..." --top-n 6 --compact --hide-404 --dedupe
+python anythingllm.py search <slug> --query "..." --top-n 6 --compact --hide-404 --dedupe
+python anythingllm.py ask <slug> --mode query --text-only --no-sources --no-metrics --message "..."
 ```
 
 ## Windows / PowerShell 注意事项
@@ -88,12 +91,13 @@ python anythingllm.py ask <slug> --mode query --message "..."
 
 ```powershell
 $env:PYTHONIOENCODING='utf-8'
-python anythingllm.py search <slug> --query "..." --top-n 6 2>&1 |
+python anythingllm.py search <slug> --query "..." --top-n 6 --compact --hide-404 --dedupe 2>&1 |
   Out-File -Encoding utf8 temp.txt
-Get-Content temp.txt
+Get-Content temp.txt -TotalCount 40
 ```
 
 不要把控制台编码错误误判成 AnythingLLM 检索失败。
+默认优先“先落盘，再局部读取”；只有确实缺信息时再看全文。
 
 ## search 和 ask 的分工
 
@@ -116,7 +120,7 @@ Get-Content temp.txt
 1. `workspace get` 看知识源
 2. 3~5 轮 `search` 按主题抽能力点
 3. 手工过滤噪声
-4. `ask --mode query` 要结构化方案
+4. `ask --mode query --text-only --no-sources --no-metrics` 要结构化方案
 5. 依据证据写最终文件
 6. 验证文件与关键 API
 
@@ -127,3 +131,5 @@ Get-Content temp.txt
 - 禁止把 `ask` 输出当成无条件真相，必须和前面的检索证据对齐
 - 禁止在命中 404 / 噪声结果时继续无筛选地生成代码
 - 禁止先写最终产物，再倒推搜索词补证据
+- 禁止默认整读 `Out-File` 保存后的长输出文件；优先 `Get-Content -TotalCount ...` 或 `Select-String`
+- 禁止无必要使用 `workspace get --full` 或 `search --full`
