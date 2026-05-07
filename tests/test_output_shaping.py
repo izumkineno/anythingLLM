@@ -20,15 +20,17 @@ WORKSPACE_PAYLOAD = {
             "slug": "demo-workspace",
             "name": "Demo Workspace",
             "chatMode": "chat",
+            "chatProvider": None,
+            "chatModel": None,
             "topN": 8,
             "similarityThreshold": 0.25,
             "lastUpdatedAt": "2026-05-06T08:00:00.000Z",
             "documents": [
-                {"filename": "alpha.md", "docpath": "docs/alpha.md"},
+                {"filename": "alpha\u200b.md", "docpath": "docs/alpha\u200b.md"},
                 {"filename": "beta.md", "docpath": "docs/beta.md"},
             ],
             "threads": [
-                {"slug": "thread-a", "user_id": None},
+                {"slug": "thread-a\u200b", "user_id": None},
                 {"slug": "thread-b", "user_id": 2},
             ],
             "openAiPrompt": "very long prompt that should not appear in summary",
@@ -89,17 +91,17 @@ WORKSPACE_LIST_PAYLOAD = {
 
 DOCUMENT_LIST_PAYLOAD = {
     "localFiles": {
-        "name": "documents",
+        "name": "documents\u200b",
         "type": "folder",
         "items": [
             {
-                "name": "custom-documents",
+                "name": "custom-documents\u200b",
                 "type": "folder",
                 "items": [
                     {
-                        "name": "alpha.md.json",
+                        "name": "alpha\u200b.md.json",
                         "type": "file",
-                        "title": "Alpha",
+                        "title": "Alpha\u200b",
                         "token_count_estimate": 123,
                         "cached": True,
                     }
@@ -233,6 +235,12 @@ class OutputShapingTests(unittest.TestCase):
         self.assertEqual(parsed["slug"], "demo-workspace")
         self.assertEqual(parsed["documentsCount"], 2)
         self.assertEqual(parsed["threadsCount"], 2)
+        self.assertIsNone(parsed["chatProvider"])
+        self.assertIsNone(parsed["chatModel"])
+        self.assertIn("fall back", parsed["chatConfigStatus"])
+        self.assertNotIn("\u200b", parsed["documentsPreview"][0]["filename"])
+        self.assertNotIn("\u200b", parsed["documentsPreview"][0]["docpath"])
+        self.assertNotIn("\u200b", parsed["threadsPreview"][0]["slug"])
         self.assertNotIn("openAiPrompt", output)
 
     def test_workspace_get_full_preserves_original_payload(self):
@@ -246,10 +254,11 @@ class OutputShapingTests(unittest.TestCase):
         with patch.object(cli, "http_request_capture", return_value=SEARCH_PAYLOAD):
             output = self.capture_stdout(lambda: args.func(args))
         parsed = json.loads(output)
-        self.assertEqual(parsed["resultsCount"], 3)
+        self.assertEqual(parsed["resultsCount"], 1)
         snippet = parsed["results"][0]["snippet"]
         self.assertLessEqual(len(snippet), 60)
         self.assertNotIn("metadata", output)
+        self.assertNotIn("404 Not Found", output)
 
     def test_search_compact_can_hide_404_noise_and_duplicate_sources(self):
         args = self.parse(
@@ -267,6 +276,38 @@ class OutputShapingTests(unittest.TestCase):
         parsed = json.loads(output)
         self.assertEqual(parsed["resultsCount"], 1)
         self.assertEqual(parsed["results"][0]["source"], "link://viewport")
+
+    def test_search_summary_dedupes_same_text_even_when_source_differs(self):
+        payload = {
+            "results": [
+                {
+                    "text": "Same useful snippet with controls\u200b and spacing",
+                    "metadata": {"title": "Doc A", "chunkSource": "link://a"},
+                    "score": 0.97,
+                },
+                {
+                    "text": "Same useful snippet with controls and spacing",
+                    "metadata": {"title": "Doc B", "chunkSource": "link://b"},
+                    "score": 0.96,
+                },
+            ]
+        }
+        result = cli.summarize_search_results(payload)
+        self.assertEqual(result["resultsCount"], 1)
+        self.assertNotIn("\u200b", result["results"][0]["snippet"])
+
+    def test_maybe_json_print_falls_back_safely_for_gbk_stdout(self):
+        class FakeStdout(io.StringIO):
+            encoding = "gbk"
+
+            def write(self, s):
+                s.encode(self.encoding, errors="strict")
+                return super().write(s)
+
+        fake_stdout = FakeStdout()
+        with patch.object(sys, "stdout", fake_stdout):
+            cli.maybe_json_print(json.dumps({"text": "contains zero width \u200b char"}, ensure_ascii=False))
+        self.assertIn("\\u200b", fake_stdout.getvalue())
 
     def test_ask_text_only_omits_sources_and_metrics_from_stdout(self):
         args = self.parse("ask", "demo-workspace", "--thread", "thread-a", "--text-only", "--message", "hello")
@@ -339,6 +380,9 @@ class OutputShapingTests(unittest.TestCase):
         self.assertEqual(parsed["foldersCount"], 1)
         self.assertEqual(parsed["filesCount"], 2)
         self.assertEqual(len(parsed["itemsPreview"]), 3)
+        self.assertNotIn("\u200b", parsed["itemsPreview"][0]["path"])
+        self.assertNotIn("\u200b", parsed["itemsPreview"][1]["path"])
+        self.assertNotIn("\u200b", parsed["itemsPreview"][1]["title"])
 
     def test_workspace_chats_defaults_to_compact_history_output(self):
         args = self.parse("workspace", "chats", "demo-workspace", "--max-items", "2", "--snippet-chars", "80")

@@ -63,6 +63,8 @@
      - 必须覆盖的能力点
      - 输出结构（要点 / 分层 / 模块）
    - `ask` 的职责是整理，不是替代前面的 `search`
+   - 如果最终要生成代码 / demo / 配置片段，默认把 `ask` 当成“整理层”，不是“事实终审层”
+   - 对关键 API 名称、事件名、配置键，输出前至少再做一次针对性 `search` 复核
 
 6. **写本地产物（如果任务要求）**
    - 把 `search` 抽到的证据 + `ask` 整理出的结构，一起变成最终文件
@@ -80,8 +82,8 @@
 python anythingllm.py auth
 python anythingllm.py workspace list
 python anythingllm.py workspace get <slug>
-python anythingllm.py search <slug> --query "..." --top-n 6 --compact --hide-404 --dedupe
-python anythingllm.py search <slug> --query "..." --top-n 6 --compact --hide-404 --dedupe
+python anythingllm.py search <slug> --query "..." --top-n 6 --compact
+python anythingllm.py search <slug> --query "..." --top-n 6 --compact
 python anythingllm.py ask <slug> --mode query --text-only --no-sources --no-metrics --message "..."
 ```
 
@@ -91,7 +93,7 @@ python anythingllm.py ask <slug> --mode query --text-only --no-sources --no-metr
 
 ```powershell
 $env:PYTHONIOENCODING='utf-8'
-python anythingllm.py search <slug> --query "..." --top-n 6 --compact --hide-404 --dedupe 2>&1 |
+python anythingllm.py search <slug> --query "..." --top-n 6 --compact 2>&1 |
   Out-File -Encoding utf8 temp.txt
 Get-Content temp.txt -TotalCount 40
 ```
@@ -129,6 +131,7 @@ Get-Content temp.txt -TotalCount 40
 - 禁止跳过 `auth` 直接 ask
 - 禁止只看一次 `search` 就下结论
 - 禁止把 `ask` 输出当成无条件真相，必须和前面的检索证据对齐
+- 禁止在关键 API / 事件名 / 配置名未经二次 `search` 复核时，直接把 `ask` 结果写成最终代码
 - 禁止在命中 404 / 噪声结果时继续无筛选地生成代码
 - 禁止先写最终产物，再倒推搜索词补证据
 - 禁止默认整读 `Out-File` 保存后的长输出文件；优先 `Get-Content -TotalCount ...` 或 `Select-String`

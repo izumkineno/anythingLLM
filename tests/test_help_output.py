@@ -41,7 +41,17 @@ class HelpOutputTests(unittest.TestCase):
 
     def test_search_help_lists_compact_flags(self):
         help_text = render_help(["search"])
-        for flag in ["--full", "--compact", "--snippet-chars", "--hide-404", "--dedupe", "--min-score", "--titles-only"]:
+        for flag in [
+            "--full",
+            "--compact",
+            "--snippet-chars",
+            "--hide-404",
+            "--no-hide-404",
+            "--dedupe",
+            "--no-dedupe",
+            "--min-score",
+            "--titles-only",
+        ]:
             self.assertIn(flag, help_text)
 
     def test_ask_help_lists_output_slimming_flags(self):
