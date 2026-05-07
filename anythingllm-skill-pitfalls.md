@@ -111,39 +111,39 @@
 - 查询次数：0
 - 现象：`search <workspace> --query ...` 能返回结果，但部分命中文档正文只有 `404 Not Found`、极短占位文本，或只包含很碎的片段
 - 原因：AnythingLLM 会把 URL 导入结果和抓取失败页一起索引；向量检索按相似度返回，不会自动过滤“低质量但相似”的文档块
-- 正确做法：先用 `workspace get <slug>` 了解工作区文档来源；对 `search` 结果逐条检查 `source / title / text`，过滤掉 404 与噪声块，只提取稳定命中的 API/能力点，不要直接把首批召回结果当成最终事实
+- 正确做法：主 skill 已把“首轮 `search` 不直接当最终事实、先过滤 404/噪声块”提升为默认决策规则；这里保留为错误案例说明，用于解释为什么某次检索结果虽然命中、却不适合直接继续生成代码
 
 ## 16. 复杂示例生成时，`search` 适合抽能力点，`ask --mode query` 更适合做结构化归纳
 
 - 查询次数：0
 - 现象：围绕同一主题连续 `search` 可以查到 `hoverStyle`、`ZoomEvent`、`RenderEvent`、`animation` 等碎片，但很难直接拼成一个结构完整的 demo / 方案
 - 原因：`search` 返回的是离散文档块，适合定位 API 和代码片段；复杂示例需要跨片段整合，单纯堆叠搜索结果容易遗漏依赖关系或结构层次
-- 正确做法：先用多次 `search` 抽取稳定命中的能力点，再用 `ask <workspace> --mode query` 让知识库基于这些能力点输出结构化方案；把 `search` 当“证据采样”，把 `ask` 当“受检索约束的整理层”
+- 正确做法：主 skill 已把“复杂整理默认走 `search -> ask`”提升为默认主流程；这里保留为案例，说明为什么在复杂示例场景里，单靠 `search` 很容易卡在碎片堆叠，而 `ask --mode query` 更适合做结构化归纳
 
 ## 17. 把长输出整份回读进上下文会抵消 CLI 的低 token 优化
 
 - 查询次数：0
 - 现象：即使已经把 `workspace get`、`search`、`ask/chat` 输出保存到文件，后续又用 `Get-Content <file>` 整份读回，token 仍然快速膨胀
 - 原因：CLI 做的 summary/compact/`--text-only`/`--no-sources`/`--json-output` 优化只能减少 stdout 体积；如果后续再把长文件整份灌回代理上下文，等于把优化抵消了
-- 正确做法：默认“先落盘，再局部读取”，优先使用 `Get-Content -TotalCount ...`、`Select-String`、`--json-output`，仅在确实缺信息时才查看全文
+- 正确做法：主 skill 已把“先落盘，再局部读取”提升为默认低 token 路线；这里保留为失败案例，用于解释为什么一次看似无害的整份 `Get-Content` 会直接抵消前面的 CLI 压缩收益。局部读取优先使用 `Get-Content -TotalCount ...`、`Select-String` 或 `--json-output`
 
 ## 18. 历史聊天与文档树命令默认原样输出时，token 膨胀比 search 更严重
 
 - 查询次数：0
 - 现象：`workspace chats`、`thread get-chats`、`admin workspace-chats`、`document list` 看起来只是“读列表/读历史”，但一旦命中长 prompt、长 response 或整棵文档树，stdout 会瞬间变成几万到几十万字节
 - 原因：这类命令天然返回聚合数据：历史聊天会同时带 prompt/response/sources/metrics，文档树会带整层 `items` 与 metadata；如果默认原样 pretty-print，体积往往比一次 `search` 更大
-- 正确做法：优先使用默认摘要模式，只看 `--max-items` / `--snippet-chars` 下的紧凑预览；只有在排查某一条记录的完整 JSON 时，才显式加 `--full`
+- 正确做法：主 skill 已把“聚合结果默认看摘要、必要时才 `--full`”提升为默认低 token 路线；这里保留为案例，帮助在历史聊天或文档树输出失控时快速定位原因
 
 ## 19. `system get` 默认全量打印时，容易把大量“配置存在但并不需要当前推理”的字段带进上下文
 
 - 查询次数：0
 - 现象：`system get` 看起来只有几 KB，但包含几十到上百个设置键；在代理流程里，这些字段大多与当前任务无关，却会持续占用上下文
 - 原因：系统配置接口会同时返回认证、存储、Embedding、LLM、语音、Agent、各供应商开关等完整设置；默认 pretty-print 会把低相关度字段一起送进上下文
-- 正确做法：默认只看系统摘要（auth / storage / embedding / llm / speech / agent），仅在确实要逐项排查某个设置键时，才使用 `system get --full`
+- 正确做法：主 skill 已把“聚合配置默认看摘要、必要时才 `--full`”提升为默认低 token 路线；这里保留为案例，用于解释为什么 `system get` 虽然体积不大，却很容易把低相关度字段整包带进上下文
 
 ## 20. 把 `ask` 的整理结果直接当成最终事实，容易把“未复核的 API 名称”写进代码
 
 - 查询次数：0
 - 现象：`ask --mode query` 给出的方案、示例或代码结构看起来很完整，但其中个别 API / 事件名 / 配置键并没有在前面的检索证据中稳定出现
 - 原因：`ask` 是受检索约束的整理层，不是严格的逐 token 事实校验器；在缺少二次复核时，模型可能补全一个“很像真的”名称
-- 正确做法：把 `ask` 结果当作结构化整理稿；对关键 API、事件名、配置键，至少再做一次针对性 `search` 复核，再写入最终代码或文档
+- 正确做法：主 skill 已把“`ask` 不是事实终审层、关键名称需二次 `search` 复核”提升为默认决策规则；这里保留为案例，用于解释为什么某些看似合理的 API 名称会在最终代码里变成假阳性
