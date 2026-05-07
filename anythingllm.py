@@ -157,6 +157,44 @@ def emit_summary_or_full(
     print_json(summarizer(payload))
 
 
+def _workspace_entries(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    workspaces = payload.get("workspaces") if isinstance(payload.get("workspaces"), list) else []
+    return [workspace for workspace in workspaces if isinstance(workspace, dict)]
+
+
+def resolve_workspace_slug(workspace_ref: str) -> str:
+    payload = http_request_capture("GET", "/workspaces", quiet=True)
+    workspaces = _workspace_entries(payload)
+
+    for workspace in workspaces:
+        slug = workspace.get("slug")
+        if isinstance(slug, str) and slug == workspace_ref:
+            return slug
+
+    matches: list[dict[str, Any]] = []
+    for workspace in workspaces:
+        name = workspace.get("name")
+        if isinstance(name, str) and name == workspace_ref:
+            matches.append(workspace)
+
+    if len(matches) == 1:
+        slug = matches[0].get("slug")
+        if isinstance(slug, str) and slug:
+            return slug
+
+    if len(matches) > 1:
+        options = ", ".join(
+            sorted(
+                slug
+                for slug in (workspace.get("slug") for workspace in matches)
+                if isinstance(slug, str) and slug
+            )
+        )
+        die(f"ambiguous workspace reference: {workspace_ref}. Use one of these slugs: {options}")
+
+    die(f"workspace not found: {workspace_ref}")
+
+
 def maybe_json_print(
     text: str,
     text_only: bool = False,
@@ -950,6 +988,7 @@ def document_move_files(args: argparse.Namespace) -> None:
 
 
 def thread_new(args: argparse.Namespace) -> None:
+    workspace_slug = resolve_workspace_slug(args.workspace)
     body: dict[str, Any] = {}
     if args.user_id is not None:
         body["userId"] = args.user_id
@@ -957,10 +996,11 @@ def thread_new(args: argparse.Namespace) -> None:
         body["name"] = args.name
     if args.slug is not None:
         body["slug"] = args.slug
-    http_request("POST", f"/workspace/{args.workspace}/thread/new", json_body=body)
+    http_request("POST", f"/workspace/{workspace_slug}/thread/new", json_body=body)
 
 
 def thread_chat(args: argparse.Namespace, stream: bool = False) -> None:
+    workspace_slug = resolve_workspace_slug(args.workspace)
     message = read_text_source(args.message)
     body: dict[str, Any] = {"message": message, "mode": args.mode}
     if args.user_id is not None:
@@ -970,7 +1010,7 @@ def thread_chat(args: argparse.Namespace, stream: bool = False) -> None:
     if stream:
         http_request(
             "POST",
-            f"/workspace/{args.workspace}/thread/{args.thread}/stream-chat",
+            f"/workspace/{workspace_slug}/thread/{args.thread}/stream-chat",
             json_body=body,
             stream=True,
             text_only=args.text_only,
@@ -982,7 +1022,7 @@ def thread_chat(args: argparse.Namespace, stream: bool = False) -> None:
     else:
         http_request(
             "POST",
-            f"/workspace/{args.workspace}/thread/{args.thread}/chat",
+            f"/workspace/{workspace_slug}/thread/{args.thread}/chat",
             json_body=body,
             text_only=args.text_only,
             no_sources=args.no_sources,
@@ -993,15 +1033,17 @@ def thread_chat(args: argparse.Namespace, stream: bool = False) -> None:
 
 
 def thread_update(args: argparse.Namespace) -> None:
+    workspace_slug = resolve_workspace_slug(args.workspace)
     http_request(
         "POST",
-        f"/workspace/{args.workspace}/thread/{args.thread}/update",
+        f"/workspace/{workspace_slug}/thread/{args.thread}/update",
         json_body={"name": args.name},
     )
 
 
 def thread_get_chats(args: argparse.Namespace) -> None:
-    path = f"/workspace/{args.workspace}/thread/{args.thread}/chats"
+    workspace_slug = resolve_workspace_slug(args.workspace)
+    path = f"/workspace/{workspace_slug}/thread/{args.thread}/chats"
     emit_summary_or_full(
         full=args.full,
         method="GET",
@@ -1011,16 +1053,18 @@ def thread_get_chats(args: argparse.Namespace) -> None:
 
 
 def thread_delete(args: argparse.Namespace) -> None:
-    http_request("DELETE", f"/workspace/{args.workspace}/thread/{args.thread}")
+    workspace_slug = resolve_workspace_slug(args.workspace)
+    http_request("DELETE", f"/workspace/{workspace_slug}/thread/{args.thread}")
 
 
 def ask(args: argparse.Namespace) -> None:
+    workspace_slug = resolve_workspace_slug(args.workspace)
     if args.thread:
         thread = args.thread
     else:
         result = http_request_capture(
             "POST",
-            f"/workspace/{args.workspace}/thread/new",
+            f"/workspace/{workspace_slug}/thread/new",
             json_body={"name": args.thread_name or "Thread"},
             quiet=True,
         )
@@ -1033,7 +1077,7 @@ def ask(args: argparse.Namespace) -> None:
     if args.stream:
         http_request(
             "POST",
-            f"/workspace/{args.workspace}/thread/{thread}/stream-chat",
+            f"/workspace/{workspace_slug}/thread/{thread}/stream-chat",
             json_body=body,
             stream=True,
             text_only=args.text_only,
@@ -1045,7 +1089,7 @@ def ask(args: argparse.Namespace) -> None:
     else:
         http_request(
             "POST",
-            f"/workspace/{args.workspace}/thread/{thread}/chat",
+            f"/workspace/{workspace_slug}/thread/{thread}/chat",
             json_body=body,
             text_only=args.text_only,
             no_sources=args.no_sources,
@@ -1056,13 +1100,14 @@ def ask(args: argparse.Namespace) -> None:
 
 
 def vector_search(args: argparse.Namespace) -> None:
+    workspace_slug = resolve_workspace_slug(args.workspace)
     body: dict[str, Any] = {"query": read_text_source(args.query)}
     if args.top_n is not None:
         body["topN"] = args.top_n
     emit_summary_or_full(
         full=args.full,
         method="POST",
-        path=f"/workspace/{args.workspace}/vector-search",
+        path=f"/workspace/{workspace_slug}/vector-search",
         json_body=body,
         summarizer=lambda payload: summarize_search_results(
             payload,
