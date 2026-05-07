@@ -5,6 +5,7 @@ import argparse
 import json
 import mimetypes
 import os
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -53,18 +54,486 @@ def parse_json_source(value: str | None) -> Any:
     return json.loads(text)
 
 
-def maybe_json_print(text: str, text_only: bool = False) -> None:
+def write_output_file(path: str, payload: Any) -> None:
+    out_path = Path(path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(payload, str):
+        out_path.write_text(payload, encoding="utf-8")
+        return
+    out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def truncate_text(text: str, limit: int) -> str:
+    if limit <= 0:
+        return ""
+    normalized = re.sub(r"\s+", " ", text).strip()
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: max(limit - 1, 0)].rstrip() + "…"
+
+
+def print_json(payload: Any) -> None:
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def compact_dict(data: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in data.items() if value is not None}
+
+
+def emit_summary_or_full(
+    *,
+    full: bool,
+    method: str,
+    path: str,
+    summarizer,
+    json_body: Any = None,
+) -> None:
+    if full:
+        if json_body is None:
+            http_request(method, path)
+        else:
+            http_request(method, path, json_body=json_body)
+        return
+    payload = http_request_capture(method, path, json_body=json_body, quiet=True)
+    print_json(summarizer(payload))
+
+
+def maybe_json_print(
+    text: str,
+    text_only: bool = False,
+    *,
+    no_sources: bool = False,
+    no_metrics: bool = False,
+    sources_limit: int | None = None,
+    json_output: str | None = None,
+) -> None:
     try:
         obj = json.loads(text)
     except Exception:
+        if json_output:
+            write_output_file(json_output, text)
         print(text)
         return
+    if json_output:
+        write_output_file(json_output, obj)
     if text_only and isinstance(obj, dict):
         response_text = obj.get("textResponse")
         if isinstance(response_text, str):
             print(response_text)
             return
-    print(json.dumps(obj, ensure_ascii=False, indent=2))
+    display_obj = obj
+    if isinstance(obj, dict):
+        display_obj = dict(obj)
+        if no_sources:
+            display_obj.pop("sources", None)
+        elif sources_limit is not None and isinstance(display_obj.get("sources"), list):
+            display_obj["sources"] = display_obj["sources"][:sources_limit]
+        if no_metrics:
+            display_obj.pop("metrics", None)
+    print(json.dumps(display_obj, ensure_ascii=False, indent=2))
+
+
+def summarize_workspace(
+    payload: dict[str, Any],
+    *,
+    max_docs: int = 5,
+    docs_only: bool = False,
+    threads_only: bool = False,
+) -> dict[str, Any]:
+    workspace = payload.get("workspace")
+    if isinstance(workspace, list):
+        workspace = workspace[0] if workspace else {}
+    if not isinstance(workspace, dict):
+        return payload
+
+    documents = workspace.get("documents") if isinstance(workspace.get("documents"), list) else []
+    threads = workspace.get("threads") if isinstance(workspace.get("threads"), list) else []
+    docs_preview = [
+        {
+            "filename": item.get("filename"),
+            "docpath": item.get("docpath"),
+        }
+        for item in documents[: max(max_docs, 0)]
+        if isinstance(item, dict)
+    ]
+    threads_preview = [
+        {"slug": item.get("slug"), "user_id": item.get("user_id")}
+        for item in threads[: max(max_docs, 0)]
+        if isinstance(item, dict)
+    ]
+
+    if docs_only:
+        return {
+            "slug": workspace.get("slug"),
+            "name": workspace.get("name"),
+            "documentsCount": len(documents),
+            "documentsPreview": docs_preview,
+        }
+    if threads_only:
+        return {
+            "slug": workspace.get("slug"),
+            "name": workspace.get("name"),
+            "threadsCount": len(threads),
+            "threadsPreview": threads_preview,
+        }
+    return {
+        "id": workspace.get("id"),
+        "slug": workspace.get("slug"),
+        "name": workspace.get("name"),
+        "chatMode": workspace.get("chatMode"),
+        "topN": workspace.get("topN"),
+        "similarityThreshold": workspace.get("similarityThreshold"),
+        "lastUpdatedAt": workspace.get("lastUpdatedAt"),
+        "documentsCount": len(documents),
+        "threadsCount": len(threads),
+        "documentsPreview": docs_preview,
+        "threadsPreview": threads_preview,
+    }
+
+
+def summarize_workspace_list(payload: dict[str, Any], *, max_items: int = 10) -> dict[str, Any]:
+    workspaces = payload.get("workspaces") if isinstance(payload.get("workspaces"), list) else []
+    preview: list[dict[str, Any]] = []
+
+    for workspace in workspaces[: max(max_items, 0)]:
+        if not isinstance(workspace, dict):
+            continue
+        threads = workspace.get("threads") if isinstance(workspace.get("threads"), list) else []
+        preview.append(
+            compact_dict(
+                {
+                    "id": workspace.get("id"),
+                    "slug": workspace.get("slug"),
+                    "name": workspace.get("name"),
+                    "chatMode": workspace.get("chatMode"),
+                    "chatProvider": workspace.get("chatProvider"),
+                    "chatModel": workspace.get("chatModel"),
+                    "topN": workspace.get("topN"),
+                    "lastUpdatedAt": workspace.get("lastUpdatedAt"),
+                    "threadsCount": len(threads),
+                    "threadsPreview": [
+                        compact_dict(
+                            {
+                                "slug": thread.get("slug"),
+                                "name": thread.get("name"),
+                                "user_id": thread.get("user_id"),
+                            }
+                        )
+                        for thread in threads[:2]
+                        if isinstance(thread, dict)
+                    ],
+                }
+            )
+        )
+
+    return {
+        "workspacesCount": len(workspaces),
+        "workspaces": preview,
+    }
+
+
+def result_score(result: dict[str, Any]) -> float | None:
+    score = result.get("score")
+    if isinstance(score, (int, float)):
+        return float(score)
+    distance = result.get("distance")
+    if isinstance(distance, (int, float)):
+        return 1 - float(distance)
+    return None
+
+
+def summarize_search_results(
+    payload: dict[str, Any],
+    *,
+    snippet_chars: int = 180,
+    hide_404: bool = False,
+    dedupe: bool = False,
+    min_score: float | None = None,
+    titles_only: bool = False,
+) -> dict[str, Any]:
+    raw_results = payload.get("results") if isinstance(payload.get("results"), list) else []
+    seen: set[tuple[str | None, str | None, str]] = set()
+    results: list[dict[str, Any]] = []
+
+    for item in raw_results:
+        if not isinstance(item, dict):
+            continue
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        title = metadata.get("title") or item.get("title")
+        source = metadata.get("chunkSource") or metadata.get("url") or item.get("url")
+        snippet = truncate_text(str(item.get("text") or ""), snippet_chars)
+        if hide_404 and "404 Not Found" in snippet:
+            continue
+        score = result_score(item)
+        if min_score is not None and score is not None and score < min_score:
+            continue
+        if dedupe:
+            signature = (source, title, snippet)
+            if signature in seen:
+                continue
+            seen.add(signature)
+        summary: dict[str, Any] = {
+            "rank": len(results) + 1,
+            "score": round(score, 4) if score is not None else None,
+            "title": title,
+            "source": source,
+        }
+        if not titles_only:
+            summary["snippet"] = snippet
+        results.append(summary)
+
+    return {
+        "resultsCount": len(results),
+        "results": results,
+    }
+
+
+def summarize_document_tree(payload: dict[str, Any], *, max_items: int = 20) -> dict[str, Any]:
+    root = payload.get("localFiles")
+    if not isinstance(root, dict):
+        return payload
+
+    preview: list[dict[str, Any]] = []
+    folders_count = 0
+    files_count = 0
+
+    def walk(node: dict[str, Any], parent_path: str = "") -> None:
+        nonlocal folders_count, files_count
+        node_type = node.get("type")
+        name = str(node.get("name") or "")
+        path = f"{parent_path}/{name}" if parent_path and name else name or parent_path
+        children = node.get("items") if isinstance(node.get("items"), list) else []
+
+        if node_type == "folder":
+            folders_count += 1
+            if path != root.get("name") and len(preview) < max(max_items, 0):
+                preview.append(
+                    {
+                        "type": "folder",
+                        "path": path,
+                        "childrenCount": len(children),
+                    }
+                )
+            for child in children:
+                if isinstance(child, dict):
+                    walk(child, path)
+            return
+
+        files_count += 1
+        if len(preview) < max(max_items, 0):
+            preview.append(
+                compact_dict(
+                    {
+                        "type": "file",
+                        "path": path,
+                        "title": node.get("title"),
+                        "tokenEstimate": node.get("token_count_estimate"),
+                        "cached": node.get("cached"),
+                    }
+                )
+            )
+
+    walk(root)
+    total_entries = max(folders_count - 1, 0) + files_count
+    return {
+        "root": root.get("name"),
+        "foldersCount": max(folders_count - 1, 0),
+        "filesCount": files_count,
+        "itemsPreview": preview,
+        "truncated": total_entries > len(preview),
+    }
+
+
+def summarize_system_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    settings = payload.get("settings")
+    if not isinstance(settings, dict):
+        return payload
+
+    secret_markers = (
+        "apikey",
+        "token",
+        "secret",
+        "password",
+        "connectionstring",
+        "authtoken",
+        "accesskey",
+    )
+
+    configured_secret_count = 0
+    for key, value in settings.items():
+        lowered = key.lower()
+        if any(marker in lowered for marker in secret_markers) and bool(value):
+            configured_secret_count += 1
+
+    storage_dir = settings.get("StorageDir")
+    storage_dir_name = None
+    if isinstance(storage_dir, str) and storage_dir:
+        storage_dir_name = Path(storage_dir).name
+
+    return {
+        "settingsCount": len(settings),
+        "configuredSecretsCount": configured_secret_count,
+        "auth": compact_dict(
+            {
+                "requiresAuth": settings.get("RequiresAuth"),
+                "multiUserMode": settings.get("MultiUserMode"),
+                "simpleSSOEnabled": settings.get("SimpleSSOEnabled"),
+                "disableViewChatHistory": settings.get("DisableViewChatHistory"),
+            }
+        ),
+        "storage": compact_dict(
+            {
+                "storageDirName": storage_dir_name,
+                "hasExistingEmbeddings": settings.get("HasExistingEmbeddings"),
+                "hasCachedEmbeddings": settings.get("HasCachedEmbeddings"),
+                "vectorDB": settings.get("VectorDB"),
+            }
+        ),
+        "embedding": compact_dict(
+            {
+                "engine": settings.get("EmbeddingEngine"),
+                "model": settings.get("EmbeddingModelPref"),
+                "outputDimensions": settings.get("EmbeddingOutputDimensions"),
+                "batchSize": settings.get("OllamaEmbeddingBatchSize"),
+            }
+        ),
+        "llm": compact_dict(
+            {
+                "provider": settings.get("LLMProvider"),
+                "model": settings.get("LLMModel"),
+                "defaultTokenLimit": settings.get("GenericOpenAiTokenLimit")
+                or settings.get("AwsBedrockLLMTokenLimit")
+                or settings.get("AzureOpenAiTokenLimit"),
+                "maxTokens": settings.get("GenericOpenAiMaxTokens") or settings.get("AwsBedrockLLMMaxOutputTokens"),
+            }
+        ),
+        "speech": compact_dict(
+            {
+                "provider": settings.get("SpeechToTextProvider"),
+                "localWhisperModel": settings.get("SpeechToTextLocalWhisperModel"),
+                "ttsProvider": settings.get("TextToSpeechProvider"),
+                "whisperProvider": settings.get("WhisperProvider"),
+            }
+        ),
+        "agent": compact_dict(
+            {
+                "maxToolCalls": settings.get("AgentSkillMaxToolCalls"),
+                "rerankerEnabled": settings.get("AgentSkillRerankerEnabled"),
+                "rerankerTopN": settings.get("AgentSkillRerankerTopN"),
+                "networkDiscovery": settings.get("NetworkDiscovery"),
+                "telemetryDisabled": settings.get("DisableTelemetry"),
+            }
+        ),
+    }
+
+
+def extract_response_preview(value: Any, *, snippet_chars: int) -> tuple[str, int | None, str | None]:
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    sources_count = None
+    model = None
+    try:
+        parsed = json.loads(text) if isinstance(text, str) else value
+    except Exception:
+        return truncate_text(str(text), snippet_chars), sources_count, model
+
+    if isinstance(parsed, dict):
+        sources = parsed.get("sources") if isinstance(parsed.get("sources"), list) else None
+        if sources is not None:
+            sources_count = len(sources)
+        metrics = parsed.get("metrics") if isinstance(parsed.get("metrics"), dict) else {}
+        if metrics:
+            metric_model = metrics.get("model")
+            model = metric_model if isinstance(metric_model, str) else None
+        preview_text = parsed.get("text") or parsed.get("textResponse") or parsed.get("content") or text
+        return truncate_text(str(preview_text), snippet_chars), sources_count, model
+
+    return truncate_text(str(parsed), snippet_chars), sources_count, model
+
+
+def summarize_chat_history(
+    payload: dict[str, Any],
+    *,
+    max_items: int = 8,
+    snippet_chars: int = 220,
+) -> dict[str, Any]:
+    if isinstance(payload.get("history"), list):
+        history = payload.get("history")
+        entries: list[dict[str, Any]] = []
+        for index, item in enumerate(history[: max(max_items, 0)], start=1):
+            if not isinstance(item, dict):
+                continue
+            metrics = item.get("metrics") if isinstance(item.get("metrics"), dict) else {}
+            entries.append(
+                compact_dict(
+                    {
+                        "index": index,
+                        "role": item.get("role"),
+                        "type": item.get("type") or "message",
+                        "chatId": item.get("chatId"),
+                        "sentAt": item.get("sentAt"),
+                        "preview": truncate_text(str(item.get("content") or ""), snippet_chars),
+                        "sourcesCount": len(item.get("sources")) if isinstance(item.get("sources"), list) else None,
+                        "totalTokens": metrics.get("total_tokens"),
+                        "model": metrics.get("model"),
+                    }
+                )
+            )
+        return {
+            "entriesCount": len(history),
+            "entries": entries,
+        }
+
+    chats = payload.get("chats") if isinstance(payload.get("chats"), list) else []
+    entries = []
+    for item in chats[: max(max_items, 0)]:
+        if not isinstance(item, dict):
+            continue
+        response_preview, sources_count, model = extract_response_preview(item.get("response"), snippet_chars=snippet_chars)
+        metrics = None
+        if isinstance(item.get("response"), str):
+            try:
+                parsed_response = json.loads(item["response"])
+            except Exception:
+                parsed_response = None
+            if isinstance(parsed_response, dict) and isinstance(parsed_response.get("metrics"), dict):
+                metrics = parsed_response["metrics"]
+        entries.append(
+            compact_dict(
+                {
+                    "id": item.get("id"),
+                    "workspace": item.get("workspace", {}).get("slug") if isinstance(item.get("workspace"), dict) else None,
+                    "threadId": item.get("thread_id"),
+                    "createdAt": item.get("createdAt"),
+                    "promptPreview": truncate_text(str(item.get("prompt") or ""), snippet_chars),
+                    "responsePreview": response_preview,
+                    "sourcesCount": sources_count,
+                    "totalTokens": metrics.get("total_tokens") if isinstance(metrics, dict) else None,
+                    "model": model or (metrics.get("model") if isinstance(metrics, dict) else None),
+                }
+            )
+        )
+
+    return {
+        "entriesCount": len(chats),
+        "entries": entries,
+    }
+
+
+def filter_chat_payload(
+    payload: dict[str, Any],
+    *,
+    no_sources: bool = False,
+    no_metrics: bool = False,
+    sources_limit: int | None = None,
+) -> dict[str, Any]:
+    display = dict(payload)
+    if no_sources:
+        display.pop("sources", None)
+    elif sources_limit is not None and isinstance(display.get("sources"), list):
+        display["sources"] = display["sources"][:sources_limit]
+    if no_metrics:
+        display.pop("metrics", None)
+    return display
 
 
 def join_path(path: str) -> str:
@@ -166,6 +635,10 @@ def http_request(
     extra_headers: dict[str, str] | None = None,
     stream: bool = False,
     text_only: bool = False,
+    no_sources: bool = False,
+    no_metrics: bool = False,
+    sources_limit: int | None = None,
+    json_output: str | None = None,
 ) -> None:
     url = join_path(path)
     headers = auth_header()
@@ -196,6 +669,14 @@ def http_request(
                     except Exception:
                         print(payload)
                         continue
+                    if json_output:
+                        write_output_file(json_output, event)
+                    event = filter_chat_payload(
+                        event,
+                        no_sources=no_sources,
+                        no_metrics=no_metrics,
+                        sources_limit=sources_limit,
+                    )
                     text = event.get("textResponse", "")
                     if text:
                         print(text, end="", flush=True)
@@ -204,7 +685,14 @@ def http_request(
                 print()
                 return
             body = resp.read().decode("utf-8", "replace")
-            maybe_json_print(body, text_only=text_only)
+            maybe_json_print(
+                body,
+                text_only=text_only,
+                no_sources=no_sources,
+                no_metrics=no_metrics,
+                sources_limit=sources_limit,
+                json_output=json_output,
+            )
     except error.HTTPError as exc:
         body = exc.read().decode("utf-8", "replace")
         die(f"HTTP {exc.code}: {body}")
@@ -212,8 +700,13 @@ def http_request(
         die(f"request failed: {exc}")
 
 
-def workspace_list(_: argparse.Namespace) -> None:
-    http_request("GET", "/workspaces")
+def workspace_list(args: argparse.Namespace) -> None:
+    emit_summary_or_full(
+        full=args.full,
+        method="GET",
+        path="/workspaces",
+        summarizer=lambda payload: summarize_workspace_list(payload, max_items=args.max_items),
+    )
 
 
 def workspace_create(args: argparse.Namespace) -> None:
@@ -221,7 +714,17 @@ def workspace_create(args: argparse.Namespace) -> None:
 
 
 def workspace_get(args: argparse.Namespace) -> None:
-    http_request("GET", f"/workspace/{args.slug}")
+    emit_summary_or_full(
+        full=args.full,
+        method="GET",
+        path=f"/workspace/{args.slug}",
+        summarizer=lambda payload: summarize_workspace(
+            payload,
+            max_docs=args.max_docs,
+            docs_only=args.docs_only,
+            threads_only=args.threads_only,
+        ),
+    )
 
 
 def workspace_update(args: argparse.Namespace) -> None:
@@ -244,7 +747,12 @@ def workspace_chats(args: argparse.Namespace) -> None:
         limit=args.limit,
         orderBy=args.order_by,
     )
-    http_request("GET", path)
+    emit_summary_or_full(
+        full=args.full,
+        method="GET",
+        path=path,
+        summarizer=lambda payload: summarize_chat_history(payload, max_items=args.max_items, snippet_chars=args.snippet_chars),
+    )
 
 
 def workspace_chat(args: argparse.Namespace, stream: bool = False) -> None:
@@ -258,7 +766,17 @@ def workspace_chat(args: argparse.Namespace, stream: bool = False) -> None:
     if attachments:
         body["attachments"] = attachments
     endpoint = f"/workspace/{args.slug}/stream-chat" if stream else f"/workspace/{args.slug}/chat"
-    http_request("POST", endpoint, json_body=body, stream=stream, text_only=args.text_only)
+    http_request(
+        "POST",
+        endpoint,
+        json_body=body,
+        stream=stream,
+        text_only=args.text_only,
+        no_sources=args.no_sources,
+        no_metrics=args.no_metrics,
+        sources_limit=args.sources_limit,
+        json_output=args.json_output,
+    )
 
 
 def workspace_update_embeddings(args: argparse.Namespace) -> None:
@@ -328,7 +846,12 @@ def document_list(args: argparse.Namespace) -> None:
     path = "/documents"
     if args.folder:
         path = f"/documents/folder/{args.folder}"
-    http_request("GET", path)
+    emit_summary_or_full(
+        full=args.full,
+        method="GET",
+        path=path,
+        summarizer=lambda payload: summarize_document_tree(payload, max_items=args.max_items),
+    )
 
 
 def document_info(args: argparse.Namespace) -> None:
@@ -375,9 +898,28 @@ def thread_chat(args: argparse.Namespace, stream: bool = False) -> None:
     if args.reset:
         body["reset"] = True
     if stream:
-        http_request("POST", f"/workspace/{args.workspace}/thread/{args.thread}/stream-chat", json_body=body, stream=True, text_only=args.text_only)
+        http_request(
+            "POST",
+            f"/workspace/{args.workspace}/thread/{args.thread}/stream-chat",
+            json_body=body,
+            stream=True,
+            text_only=args.text_only,
+            no_sources=args.no_sources,
+            no_metrics=args.no_metrics,
+            sources_limit=args.sources_limit,
+            json_output=args.json_output,
+        )
     else:
-        http_request("POST", f"/workspace/{args.workspace}/thread/{args.thread}/chat", json_body=body, text_only=args.text_only)
+        http_request(
+            "POST",
+            f"/workspace/{args.workspace}/thread/{args.thread}/chat",
+            json_body=body,
+            text_only=args.text_only,
+            no_sources=args.no_sources,
+            no_metrics=args.no_metrics,
+            sources_limit=args.sources_limit,
+            json_output=args.json_output,
+        )
 
 
 def thread_update(args: argparse.Namespace) -> None:
@@ -389,7 +931,13 @@ def thread_update(args: argparse.Namespace) -> None:
 
 
 def thread_get_chats(args: argparse.Namespace) -> None:
-    http_request("GET", f"/workspace/{args.workspace}/thread/{args.thread}/chats")
+    path = f"/workspace/{args.workspace}/thread/{args.thread}/chats"
+    emit_summary_or_full(
+        full=args.full,
+        method="GET",
+        path=path,
+        summarizer=lambda payload: summarize_chat_history(payload, max_items=args.max_items, snippet_chars=args.snippet_chars),
+    )
 
 
 def thread_delete(args: argparse.Namespace) -> None:
@@ -413,16 +961,48 @@ def ask(args: argparse.Namespace) -> None:
     if args.reset:
         body["reset"] = True
     if args.stream:
-        http_request("POST", f"/workspace/{args.workspace}/thread/{thread}/stream-chat", json_body=body, stream=True, text_only=args.text_only)
+        http_request(
+            "POST",
+            f"/workspace/{args.workspace}/thread/{thread}/stream-chat",
+            json_body=body,
+            stream=True,
+            text_only=args.text_only,
+            no_sources=args.no_sources,
+            no_metrics=args.no_metrics,
+            sources_limit=args.sources_limit,
+            json_output=args.json_output,
+        )
     else:
-        http_request("POST", f"/workspace/{args.workspace}/thread/{thread}/chat", json_body=body, text_only=args.text_only)
+        http_request(
+            "POST",
+            f"/workspace/{args.workspace}/thread/{thread}/chat",
+            json_body=body,
+            text_only=args.text_only,
+            no_sources=args.no_sources,
+            no_metrics=args.no_metrics,
+            sources_limit=args.sources_limit,
+            json_output=args.json_output,
+        )
 
 
 def vector_search(args: argparse.Namespace) -> None:
     body: dict[str, Any] = {"query": read_text_source(args.query)}
     if args.top_n is not None:
         body["topN"] = args.top_n
-    http_request("POST", f"/workspace/{args.workspace}/vector-search", json_body=body)
+    emit_summary_or_full(
+        full=args.full,
+        method="POST",
+        path=f"/workspace/{args.workspace}/vector-search",
+        json_body=body,
+        summarizer=lambda payload: summarize_search_results(
+            payload,
+            snippet_chars=args.snippet_chars,
+            hide_404=args.hide_404,
+            dedupe=args.dedupe,
+            min_score=args.min_score,
+            titles_only=args.titles_only,
+        ),
+    )
 
 
 def auth_verify(_: argparse.Namespace) -> None:
@@ -434,7 +1014,12 @@ def user_list(_: argparse.Namespace) -> None:
 
 
 def system_get(_: argparse.Namespace) -> None:
-    http_request("GET", "/system")
+    emit_summary_or_full(
+        full=_.full,
+        method="GET",
+        path="/system",
+        summarizer=summarize_system_settings,
+    )
 
 
 def system_vector_count(_: argparse.Namespace) -> None:
@@ -478,7 +1063,13 @@ def admin_update_preferences(args: argparse.Namespace) -> None:
 
 def admin_workspace_chats(args: argparse.Namespace) -> None:
     payload = optional_json(args.json, arg_name="--json", expected_type=dict)
-    http_request("POST", "/admin/workspace-chats", json_body=payload)
+    emit_summary_or_full(
+        full=args.full,
+        method="POST",
+        path="/admin/workspace-chats",
+        json_body=payload,
+        summarizer=lambda result: summarize_chat_history(result, max_items=args.max_items, snippet_chars=args.snippet_chars),
+    )
 
 
 def admin_manage_users(args: argparse.Namespace) -> None:
@@ -505,11 +1096,23 @@ def embed_delete(args: argparse.Namespace) -> None:
 
 
 def embed_chats(args: argparse.Namespace) -> None:
-    http_request("GET", f"/embed/{args.embed_uuid}/chats")
+    path = f"/embed/{args.embed_uuid}/chats"
+    emit_summary_or_full(
+        full=args.full,
+        method="GET",
+        path=path,
+        summarizer=lambda payload: summarize_chat_history(payload, max_items=args.max_items, snippet_chars=args.snippet_chars),
+    )
 
 
 def embed_session_chats(args: argparse.Namespace) -> None:
-    http_request("GET", f"/embed/{args.embed_uuid}/chats/{args.session_uuid}")
+    path = f"/embed/{args.embed_uuid}/chats/{args.session_uuid}"
+    emit_summary_or_full(
+        full=args.full,
+        method="GET",
+        path=path,
+        summarizer=lambda payload: summarize_chat_history(payload, max_items=args.max_items, snippet_chars=args.snippet_chars),
+    )
 
 
 def openai_models(_: argparse.Namespace) -> None:
@@ -618,6 +1221,8 @@ def build_parser() -> argparse.ArgumentParser:
     ws = p.add_subparsers(dest="ws_command", required=True)
 
     sp = ws.add_parser("list", help="列出全部工作区")
+    sp.add_argument("--full", action="store_true", help="输出完整原始 JSON，而不是默认摘要列表")
+    sp.add_argument("--max-items", type=int, default=10, help="摘要模式下最多展示多少个工作区")
     sp.set_defaults(func=workspace_list)
 
     sp = ws.add_parser("create", help="创建工作区")
@@ -626,6 +1231,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = ws.add_parser("get", help="查看单个工作区详情")
     sp.add_argument("slug")
+    sp.add_argument("--full", action="store_true", help="输出完整原始 JSON，而不是默认摘要")
+    sp.add_argument("--max-docs", type=int, default=5, help="摘要模式下最多展示多少条文档/线程预览")
+    sp.add_argument("--docs-only", action="store_true", help="摘要模式下仅输出文档摘要")
+    sp.add_argument("--threads-only", action="store_true", help="摘要模式下仅输出线程摘要")
     sp.set_defaults(func=workspace_get)
 
     sp = ws.add_parser("update", help="更新工作区配置")
@@ -653,6 +1262,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--session-id")
     sp.add_argument("--attachments", help="附件 JSON 数组、文件路径，或 - 从 stdin 读取")
     sp.add_argument("--text-only", action="store_true", help="只输出 textResponse 正文，适合重定向保存代码/文稿")
+    sp.add_argument("--no-sources", action="store_true", help="隐藏返回中的 sources 字段，减少 stdout 体积")
+    sp.add_argument("--sources-limit", type=int, help="仅保留前 N 条 sources")
+    sp.add_argument("--no-metrics", action="store_true", help="隐藏返回中的 metrics 字段")
+    sp.add_argument("--json-output", help="将完整 JSON 响应写入文件，stdout 只打印过滤后的结果")
     sp.add_argument("--reset", action="store_true")
     sp.set_defaults(func=lambda args: workspace_chat(args, stream=False))
 
@@ -663,6 +1276,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--session-id")
     sp.add_argument("--attachments", help="附件 JSON 数组、文件路径，或 - 从 stdin 读取")
     sp.add_argument("--text-only", action="store_true", help="只输出 textResponse 正文（流式模式下通常与默认输出一致）")
+    sp.add_argument("--no-sources", action="store_true", help="隐藏返回中的 sources 字段，减少 stdout 体积")
+    sp.add_argument("--sources-limit", type=int, help="仅保留前 N 条 sources")
+    sp.add_argument("--no-metrics", action="store_true", help="隐藏返回中的 metrics 字段")
+    sp.add_argument("--json-output", help="将完整 JSON 响应写入文件，stdout 只打印过滤后的结果")
     sp.add_argument("--reset", action="store_true")
     sp.set_defaults(func=lambda args: workspace_chat(args, stream=True))
 
@@ -671,6 +1288,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--api-session-id")
     sp.add_argument("--limit", type=int)
     sp.add_argument("--order-by", choices=["asc", "desc"])
+    sp.add_argument("--full", action="store_true", help="输出完整原始 JSON，而不是默认紧凑摘要")
+    sp.add_argument("--max-items", type=int, default=8, help="摘要模式下最多展示多少条聊天记录")
+    sp.add_argument("--snippet-chars", type=int, default=220, help="摘要模式下 prompt/response 预览的截断长度")
     sp.set_defaults(func=workspace_chats)
 
     sp = ws.add_parser("update-embeddings", help="批量增删工作区文档绑定")
@@ -712,6 +1332,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = doc.add_parser("list", help="列出文档，可选按目录过滤")
     sp.add_argument("--folder")
+    sp.add_argument("--full", action="store_true", help="输出完整原始 JSON，而不是默认目录摘要")
+    sp.add_argument("--max-items", type=int, default=20, help="摘要模式下最多展示多少个目录/文件预览")
     sp.set_defaults(func=document_list)
 
     sp = doc.add_parser("get", help="查看单个文档详情")
@@ -757,6 +1379,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--mode", default="chat", choices=["chat", "query", "automatic"])
     sp.add_argument("--user-id", type=int)
     sp.add_argument("--text-only", action="store_true", help="只输出 textResponse 正文，适合重定向保存代码/文稿")
+    sp.add_argument("--no-sources", action="store_true", help="隐藏返回中的 sources 字段，减少 stdout 体积")
+    sp.add_argument("--sources-limit", type=int, help="仅保留前 N 条 sources")
+    sp.add_argument("--no-metrics", action="store_true", help="隐藏返回中的 metrics 字段")
+    sp.add_argument("--json-output", help="将完整 JSON 响应写入文件，stdout 只打印过滤后的结果")
     sp.add_argument("--reset", action="store_true")
     sp.set_defaults(func=lambda args: thread_chat(args, stream=False))
 
@@ -767,6 +1393,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--mode", default="chat", choices=["chat", "query", "automatic"])
     sp.add_argument("--user-id", type=int)
     sp.add_argument("--text-only", action="store_true", help="只输出 textResponse 正文（流式模式下通常与默认输出一致）")
+    sp.add_argument("--no-sources", action="store_true", help="隐藏返回中的 sources 字段，减少 stdout 体积")
+    sp.add_argument("--sources-limit", type=int, help="仅保留前 N 条 sources")
+    sp.add_argument("--no-metrics", action="store_true", help="隐藏返回中的 metrics 字段")
+    sp.add_argument("--json-output", help="将完整 JSON 响应写入文件，stdout 只打印过滤后的结果")
     sp.add_argument("--reset", action="store_true")
     sp.set_defaults(func=lambda args: thread_chat(args, stream=True))
 
@@ -779,6 +1409,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp = th.add_parser("get-chats", help="获取线程历史消息")
     sp.add_argument("workspace")
     sp.add_argument("thread")
+    sp.add_argument("--full", action="store_true", help="输出完整原始 JSON，而不是默认紧凑摘要")
+    sp.add_argument("--max-items", type=int, default=8, help="摘要模式下最多展示多少条聊天记录")
+    sp.add_argument("--snippet-chars", type=int, default=220, help="摘要模式下 prompt/response 预览的截断长度")
     sp.set_defaults(func=thread_get_chats)
 
     sp = th.add_parser("delete", help="删除线程")
@@ -794,6 +1427,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--mode", default="chat", choices=["chat", "query", "automatic"])
     p.add_argument("--stream", action="store_true")
     p.add_argument("--text-only", action="store_true", help="只输出 textResponse 正文，适合重定向保存代码/文稿")
+    p.add_argument("--no-sources", action="store_true", help="隐藏返回中的 sources 字段，减少 stdout 体积")
+    p.add_argument("--sources-limit", type=int, help="仅保留前 N 条 sources")
+    p.add_argument("--no-metrics", action="store_true", help="隐藏返回中的 metrics 字段")
+    p.add_argument("--json-output", help="将完整 JSON 响应写入文件，stdout 只打印过滤后的结果")
     p.add_argument("--reset", action="store_true")
     p.set_defaults(func=ask)
 
@@ -801,6 +1438,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("workspace")
     p.add_argument("--query", required=True, help="query text, file path, or - for stdin")
     p.add_argument("--top-n", type=int)
+    p.add_argument("--full", action="store_true", help="输出完整原始 JSON，而不是默认紧凑摘要")
+    p.add_argument("--compact", action="store_true", help="兼容性参数：当前紧凑摘要已是默认行为")
+    p.add_argument("--snippet-chars", type=int, default=180, help="紧凑模式下 snippet 截断长度")
+    p.add_argument("--hide-404", action="store_true", help="过滤正文中含 404 Not Found 的噪声结果")
+    p.add_argument("--dedupe", action="store_true", help="按 source/title/snippet 去重结果")
+    p.add_argument("--min-score", type=float, help="仅保留 score 不低于该阈值的结果")
+    p.add_argument("--titles-only", action="store_true", help="仅输出 title/source/score，不输出 snippet")
     p.set_defaults(func=vector_search)
 
     p = sub.add_parser("auth", help="验证当前 API Key 是否有效")
@@ -816,6 +1460,7 @@ def build_parser() -> argparse.ArgumentParser:
     system = p.add_subparsers(dest="system_command", required=True)
 
     sp = system.add_parser("get", help="读取当前系统设置")
+    sp.add_argument("--full", action="store_true", help="输出完整原始 JSON，而不是默认摘要")
     sp.set_defaults(func=system_get)
 
     sp = system.add_parser("vector-count", help="读取向量库中向量总数")
@@ -854,6 +1499,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = admin.add_parser("workspace-chats", help="分页读取全系统工作区聊天")
     sp.add_argument("--json", help="可选 JSON 对象，例如 {""offset"": 2}")
+    sp.add_argument("--full", action="store_true", help="输出完整原始 JSON，而不是默认紧凑摘要")
+    sp.add_argument("--max-items", type=int, default=8, help="摘要模式下最多展示多少条聊天记录")
+    sp.add_argument("--snippet-chars", type=int, default=220, help="摘要模式下 prompt/response 预览的截断长度")
     sp.set_defaults(func=admin_workspace_chats)
 
     sp = admin.add_parser("manage-users", help="按工作区 slug 设置用户访问权限")
@@ -882,11 +1530,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = embed.add_parser("chats", help="读取 embed 的全部聊天")
     sp.add_argument("embed_uuid")
+    sp.add_argument("--full", action="store_true", help="输出完整原始 JSON，而不是默认紧凑摘要")
+    sp.add_argument("--max-items", type=int, default=8, help="摘要模式下最多展示多少条聊天记录")
+    sp.add_argument("--snippet-chars", type=int, default=220, help="摘要模式下 prompt/response 预览的截断长度")
     sp.set_defaults(func=embed_chats)
 
     sp = embed.add_parser("session-chats", help="读取 embed 某个 session 的聊天")
     sp.add_argument("embed_uuid")
     sp.add_argument("session_uuid")
+    sp.add_argument("--full", action="store_true", help="输出完整原始 JSON，而不是默认紧凑摘要")
+    sp.add_argument("--max-items", type=int, default=8, help="摘要模式下最多展示多少条聊天记录")
+    sp.add_argument("--snippet-chars", type=int, default=220, help="摘要模式下 prompt/response 预览的截断长度")
     sp.set_defaults(func=embed_session_chats)
 
     p = sub.add_parser("openai", help="OpenAI 兼容接口命令")

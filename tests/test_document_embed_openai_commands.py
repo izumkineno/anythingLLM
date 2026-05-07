@@ -1,5 +1,9 @@
 import unittest
+import sys
+from pathlib import Path
 from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import anythingllm as cli
 
@@ -40,8 +44,14 @@ class DocumentEmbedOpenAICommandTests(unittest.TestCase):
         http_request.assert_called_once_with(
             "POST",
             "/document/move-files",
-            json_body=[{"from": "custom-documents/a.txt", "to": "archive/a.txt"}],
+            json_body={"files": [{"from": "custom-documents/a.txt", "to": "archive/a.txt"}]},
         )
+
+    def test_document_list_parses_summary_flags(self):
+        args = self.parse("document", "list", "--folder", "docs", "--full", "--max-items", "12")
+        self.assertEqual(args.folder, "docs")
+        self.assertTrue(args.full)
+        self.assertEqual(args.max_items, 12)
 
     def test_embed_create_uses_new_endpoint(self):
         args = self.parse(

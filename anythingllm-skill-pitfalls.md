@@ -119,3 +119,24 @@
 - 现象：围绕同一主题连续 `search` 可以查到 `hoverStyle`、`ZoomEvent`、`RenderEvent`、`animation` 等碎片，但很难直接拼成一个结构完整的 demo / 方案
 - 原因：`search` 返回的是离散文档块，适合定位 API 和代码片段；复杂示例需要跨片段整合，单纯堆叠搜索结果容易遗漏依赖关系或结构层次
 - 正确做法：先用多次 `search` 抽取稳定命中的能力点，再用 `ask <workspace> --mode query` 让知识库基于这些能力点输出结构化方案；把 `search` 当“证据采样”，把 `ask` 当“受检索约束的整理层”
+
+## 17. 把长输出整份回读进上下文会抵消 CLI 的低 token 优化
+
+- 查询次数：0
+- 现象：即使已经把 `workspace get`、`search`、`ask/chat` 输出保存到文件，后续又用 `Get-Content <file>` 整份读回，token 仍然快速膨胀
+- 原因：CLI 做的 summary/compact/`--text-only`/`--no-sources`/`--json-output` 优化只能减少 stdout 体积；如果后续再把长文件整份灌回代理上下文，等于把优化抵消了
+- 正确做法：默认“先落盘，再局部读取”，优先使用 `Get-Content -TotalCount ...`、`Select-String`、`--json-output`，仅在确实缺信息时才查看全文
+
+## 18. 历史聊天与文档树命令默认原样输出时，token 膨胀比 search 更严重
+
+- 查询次数：0
+- 现象：`workspace chats`、`thread get-chats`、`admin workspace-chats`、`document list` 看起来只是“读列表/读历史”，但一旦命中长 prompt、长 response 或整棵文档树，stdout 会瞬间变成几万到几十万字节
+- 原因：这类命令天然返回聚合数据：历史聊天会同时带 prompt/response/sources/metrics，文档树会带整层 `items` 与 metadata；如果默认原样 pretty-print，体积往往比一次 `search` 更大
+- 正确做法：优先使用默认摘要模式，只看 `--max-items` / `--snippet-chars` 下的紧凑预览；只有在排查某一条记录的完整 JSON 时，才显式加 `--full`
+
+## 19. `system get` 默认全量打印时，容易把大量“配置存在但并不需要当前推理”的字段带进上下文
+
+- 查询次数：0
+- 现象：`system get` 看起来只有几 KB，但包含几十到上百个设置键；在代理流程里，这些字段大多与当前任务无关，却会持续占用上下文
+- 原因：系统配置接口会同时返回认证、存储、Embedding、LLM、语音、Agent、各供应商开关等完整设置；默认 pretty-print 会把低相关度字段一起送进上下文
+- 正确做法：默认只看系统摘要（auth / storage / embedding / llm / speech / agent），仅在确实要逐项排查某个设置键时，才使用 `system get --full`

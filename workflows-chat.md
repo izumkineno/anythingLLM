@@ -38,7 +38,8 @@
 2. 跑 `python anythingllm.py auth`
 3. 确认目标 workspace 存在：
    - `python anythingllm.py workspace list`
-   - `python anythingllm.py workspace get <slug>`
+   - 默认先看摘要：`python anythingllm.py workspace get <slug>`
+   - 只有明确需要完整原始 JSON 时，才用：`python anythingllm.py workspace get <slug> --full`
 
 不要跳过 `auth`，也不要在 workspace 未确认前直接 chat。
 
@@ -63,10 +64,15 @@
 如果要直接写文件，优先使用：
 
 ```powershell
-python anythingllm.py workspace chat <slug> --mode chat --text-only --message -
+python anythingllm.py workspace chat <slug> --mode chat --text-only --no-sources --no-metrics --message -
 ```
 
 然后再重定向到文件。
+如果你还需要保留完整原始 JSON 供排查或离线分析，优先改用：
+
+```powershell
+python anythingllm.py workspace chat <slug> --mode chat --text-only --no-sources --no-metrics --json-output response.json --message -
+```
 
 ### 2. 只产出某个模块 / 某段代码
 
@@ -169,8 +175,14 @@ prompt 应明确：
 推荐：
 
 ```powershell
-python anythingllm.py workspace chat <slug> --mode chat --text-only --message - |
+python anythingllm.py workspace chat <slug> --mode chat --text-only --no-sources --no-metrics --message - |
   Out-File -Encoding utf8 output.html
+```
+
+如果输出较长，默认不要直接 `Get-Content output.html` 整读回灌上下文；优先：
+
+```powershell
+Get-Content output.html -TotalCount 40
 ```
 
 ### 存临时文件，再人工筛选
@@ -219,6 +231,15 @@ python anythingllm.py workspace chat <slug> --mode chat --text-only --message - 
 - `thread chat --text-only`
 - `ask --text-only`
 
+如果你只关心正文，默认再叠加：
+
+- `--no-sources`
+- `--no-metrics`
+
+如果你既想保留完整 JSON 又不想把它灌回当前上下文，优先使用：
+
+- `--json-output <file>`
+
 因为默认非流式 chat 输出的是整包 JSON，包含：
 
 - `textResponse`
@@ -265,7 +286,7 @@ python anythingllm.py workspace chat <slug> --mode chat --text-only --message - 
 1. `auth`
 2. `workspace get <slug>`
 3. 写严格 prompt
-4. `workspace chat --mode chat --text-only`
+4. `workspace chat --mode chat --text-only --no-sources --no-metrics`
 5. 落盘到目标文件
 6. 验证文件结构与运行结果
 
@@ -291,6 +312,8 @@ python anythingllm.py workspace chat <slug> --mode chat --text-only --message - 
 - 禁止跳过 `auth` 直接 chat
 - 禁止把 chat 输出当成无条件真相，必须本地验证
 - 禁止在需要直接落盘时忘记考虑 `--text-only`
+- 禁止在长输出已落盘后默认执行整份 `Get-Content <file>` 回灌上下文
+- 禁止无必要使用 `workspace get --full`
 - 禁止把“适合 ask-query 的整理任务”硬塞进 chat，导致 prompt 失焦
 - 禁止让对端自由发挥却又期待它精确改某个模块——模块边界必须说清楚
 - 禁止生成代码后不做运行/结构验证
